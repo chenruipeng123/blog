@@ -1,0 +1,57 @@
+---
+title: React 列表渲染性能优化：key 的陷阱
+slug: react-list-key-pitfall
+description: 使用数组 index 作为 key 导致的渲染错误和性能问题，以及正确的解决方案。
+date: 2026-05-03
+tags: [react, frontend, performance]
+---
+
+## 问题场景
+
+一个待办列表页面，支持添加、删除、排序。某天用户反馈：删除中间某项后，后面的项目动画错乱，偶尔出现状态串位。
+
+## 错误代码
+
+```tsx
+function TodoList() {
+  const [todos, setTodos] = useState<Todo[]>([
+    { id: 'a', text: '写周报', done: false },
+    { id: 'b', text: '修 bug', done: true },
+  ])
+
+  return (
+    <ul>
+      {todos.map((todo, index) => (
+        <TodoItem key={index} todo={todo} />  // 问题在这
+      ))}
+    </ul>
+  )
+}
+```
+
+## 原因分析
+
+使用 `index` 作为 key 时：
+
+1. 删除 `todos[1]`，新数组 `todos[1]` 变成原来的 `todos[2]`
+2. React 认为 key=1 的组件还在（只是 props 变了），不会卸载重建
+3. 组件内部的动画状态、输入框内容、聚焦状态等会保留，但关联了错误的数据
+
+这被称为 **"identity crisis"** — React 把两个不同的实体当成了同一个。
+
+## 正确做法
+
+```tsx
+{todos.map((todo) => (
+  <TodoItem key={todo.id} todo={todo} />  // 使用稳定的唯一 ID
+))}
+```
+
+## 什么时候可以用 index 做 key？
+
+三个条件**同时满足**：
+1. 列表项**不会**被插入/删除/重新排序
+2. 列表项**没有**内部状态（受控组件）
+3. 列表项是**静态**的
+
+> 不确定时，永远使用唯一 ID。UUID、数据库 ID、`crypto.randomUUID()` 都可以。

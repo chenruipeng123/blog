@@ -1,0 +1,80 @@
+---
+title: PostgreSQL 死锁排查：一次批量更新引发的血案
+slug: postgres-deadlock-batch-update
+description: 批量更新操作导致 PostgreSQL 死锁，从日志分析到锁机制理解再到最终修复。
+date: 2026-05-05
+tags: [postgresql, database, debugging]
+---
+
+## 现象
+
+凌晨的批量数据同步任务突然报错：
+
+```
+ERROR: deadlock detected
+DETAIL: Process 12345 waits for ShareLock on transaction 67890;
+        blocked by process 12346.
+```
+
+任务失败率从 0% 上升到 15%。
+
+## 排查步骤
+
+### 1. 查看死锁日志
+
+```sql
+SELECT * FROM pg_stat_activity WHERE wait_event_type = 'Lock';
+```
+
+### 2. 定位问题 SQL
+
+出问题的是一条 UPDATE 语句，在批量更新用户积分时：
+
+```sql
+-- 原来的写法
+UPDATE users SET score = score + $1 WHERE id = ANY($2)
+```
+
+每个 worker 线程更新不同的用户，为什么会有锁冲突？
+
+### 3. 根因分析
+
+PostgreSQL 的行锁和行顺序问题：
+
+- `UPDATE ... WHERE id = ANY($2)` 中的 ID 数组顺序**不确定**
+- 多个并发事务以不同顺序锁定多行（例如事务 A 锁 id=5 再锁 id=3，事务 B 锁 id=3 再锁 id=5）
+- 形成经典的**循环等待** → 死锁
+
+```
+事务 A: 锁 id=5 ✓ → 等待 id=3 ⏳
+事务 B: 锁 id=3 ✓ → 等待 id=5 ⏳
+       ↑____ 死锁 ____↑
+```
+
+## 解决方案
+
+```sql
+-- 修复：始终按 ID 排序，保证所有事务的加锁顺序一致
+UPDATE users SET score = score + $1
+WHERE id = ANY(SELECT unnest($2::int[]) ORDER BY 1)
+```
+
+确保所有并发事务以**相同顺序**获取行锁，打破循环等待。
+
+或者使用 advisory lock 串行化：
+
+```sql
+-- 对整批操作加 advisory lock
+SELECT pg_advisory_xact_lock(hashtext('batch_score_update'));
+UPDATE users SET score = score + $1 WHERE id = ANY($2);
+```
+
+## 总结
+
+| 方案 | 优点 | 缺点 |
+|---|---|---|
+| 排序加锁 | 简单，并发性好 | 需要改 SQL |
+| Advisory Lock | 绝对串行 | 降低并发 |
+| SKIP LOCKED | 无死锁 | 可能漏更新 |
+
+> 对于批量 OLTP 操作，排序加锁是最佳实践。Advisory Lock 适合运维类的一次性脚本。
