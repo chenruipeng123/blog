@@ -6,6 +6,7 @@
     "dev": "velite dev & next dev",
     "build": "velite build && next build",
     "start": "next start",
+    "new": "node scripts/new-post.js",
     "lint": "eslint"
   },
   "dependencies": {
